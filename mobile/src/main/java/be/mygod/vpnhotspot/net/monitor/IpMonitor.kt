@@ -5,7 +5,6 @@ import androidx.core.content.edit
 import be.mygod.librootkotlinx.RootServer
 import be.mygod.librootkotlinx.isEBADF
 import be.mygod.vpnhotspot.App.Companion.app
-import be.mygod.vpnhotspot.BuildConfig
 import be.mygod.vpnhotspot.R
 import be.mygod.vpnhotspot.net.Routing
 import be.mygod.vpnhotspot.root.ProcessData
@@ -25,12 +24,12 @@ abstract class IpMonitor {
     companion object {
         const val KEY = "service.ipMonitor"
         // https://android.googlesource.com/platform/external/iproute2/+/7f7a711/lib/libnetlink.c#493
-        private val errorMatcher = ("(^Cannot bind netlink socket: |" +
+        private val errorMatcher = ("(?:^Cannot (?:bind netlink socket|send dump request): |^request send failed: |" +
                 "Dump (was interrupted and may be inconsistent.|terminated)$)").toRegex()
         var currentMode: Mode
             get() {
-                val isLegacy = Build.VERSION.SDK_INT < 30 || BuildConfig.TARGET_SDK < 30
-                val defaultMode = if (isLegacy) @Suppress("DEPRECATION") {
+                // Completely restricted on Android 13: https://github.com/termux/termux-app/issues/2993#issuecomment-1250312777
+                val defaultMode = if (Build.VERSION.SDK_INT < 30) @Suppress("DEPRECATION") {
                     Mode.Poll
                 } else Mode.MonitorRoot
                 return Mode.valueOf(app.pref.getString(KEY, defaultMode.toString()) ?: "")
@@ -114,14 +113,15 @@ abstract class IpMonitor {
                 try {
                     RootManager.use { server ->
                         // while we only need to use this server once, we need to also keep the server alive
-                        handleChannel(server.create(ProcessListener(errorMatcher, Routing.IP, "monitor", monitoredObject),
-                            this))
+                        handleChannel(server.create(ProcessListener(errorMatcher,
+                            Routing.IP, "monitor", monitoredObject), this))
                     }
                 } catch (_: CancellationException) {
                 } catch (e: Exception) {
                     Timber.w(e)
                 }
                 if (destroyed) return@launch
+                app.logEvent("ip_monitor_failure")
             }
             withContext(Dispatchers.IO) {
                 var server: RootServer? = null
@@ -151,10 +151,11 @@ abstract class IpMonitor {
     fun flushAsync() = GlobalScope.launch(Dispatchers.IO) { flush() }
 
     private suspend fun work(server: RootServer?): RootServer? {
-        if (currentMode != Mode.PollRoot) try {
+        if (currentMode != Mode.PollRoot && currentMode != Mode.MonitorRoot) try {
             poll()
             return server
         } catch (e: IOException) {
+            app.logEvent("ip_poll_failure")
             Timber.d(e)
         }
         var newServer = server
@@ -167,6 +168,7 @@ abstract class IpMonitor {
             if (lines.any { errorMatcher.containsMatchIn(it) }) throw IOException(result.out)
             processLines(lines.asSequence())
         } catch (e: Exception) {
+            app.logEvent("ip_su_poll_failure") { param("cause", e.message.toString()) }
             Timber.d(e)
         }
         return if (newServer?.active != false) newServer else {

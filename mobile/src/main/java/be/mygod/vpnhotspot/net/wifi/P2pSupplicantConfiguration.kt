@@ -1,10 +1,13 @@
 package be.mygod.vpnhotspot.net.wifi
 
+import android.net.MacAddress
 import android.net.wifi.p2p.WifiP2pGroup
+import android.util.Log
 import be.mygod.vpnhotspot.RepeaterService
 import be.mygod.vpnhotspot.net.MacAddressCompat
 import be.mygod.vpnhotspot.root.RepeaterCommands
 import be.mygod.vpnhotspot.root.RootManager
+import timber.log.Timber
 
 /**
  * This parser is based on:
@@ -52,8 +55,8 @@ class P2pSupplicantConfiguration(private val group: WifiP2pGroup? = null) {
             var bssids = listOfNotNull(group?.owner?.deviceAddress, ownerAddress)
                     .distinct()
                     .filter {
+                        val mac = MacAddress.fromString(it)
                         try {
-                            val mac = MacAddressCompat.fromString(it)
                             mac != MacAddressCompat.ALL_ZEROS_ADDRESS && mac != MacAddressCompat.ANY_ADDRESS
                         } catch (_: IllegalArgumentException) {
                             false
@@ -74,7 +77,13 @@ class P2pSupplicantConfiguration(private val group: WifiP2pGroup? = null) {
                                 if (matchedBssid.isEmpty()) {
                                     check(block.pskLine == null && block.psk == null)
                                     if (match.groups[5] != null) {
-                                        block.psk = match.groupValues[5].apply { check(length in 8..63) }
+                                        block.psk = match.groupValues[5].apply {
+                                            when (length) {
+                                                in 8..63 -> { }
+                                                64 -> error("WPA-PSK hex not supported")
+                                                else -> error("Unknown length $length")
+                                            }
+                                        }
                                     }
                                     block.pskLine = block.size
                                 } else if (bssids.any { matchedBssid.equals(it, true) }) {
@@ -119,24 +128,23 @@ class P2pSupplicantConfiguration(private val group: WifiP2pGroup? = null) {
                     add("\tmode=3")
                     add("\tdisabled=2")
                     add("}")
-                    if (target == null) target = this
+                    target = this
                 })
             }
             content = Content(result, target!!, persistentMacLine, legacy)
         } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "init failed")
             throw e
         }
     }
-
     val psk by lazy { group?.passphrase ?: content.target.psk!! }
     val bssid by lazy {
-        content.target.bssid?.let { MacAddressCompat.fromString(it) }
+        content.target.bssid?.let { MacAddress.fromString(it) }
     }
 
-    suspend fun update(ssid: String, psk: String, bssid: MacAddressCompat?) {
+    suspend fun update(ssid: WifiSsidCompat, psk: String, bssid: MacAddress?) {
         val (lines, block, persistentMacLine, legacy) = content
-        block[block.ssidLine!!] = "\tssid=" + ssid.toByteArray()
-                .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
+        block[block.ssidLine!!] = "\tssid=${ssid.hex}"
         block[block.pskLine!!] = "\tpsk=\"$psk\""   // no control chars or weird stuff
         if (bssid != null) {
             persistentMacLine?.let { lines[it] = PERSISTENT_MAC + bssid }

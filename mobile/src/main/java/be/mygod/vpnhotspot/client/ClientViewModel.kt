@@ -3,8 +3,12 @@ package be.mygod.vpnhotspot.client
 import android.content.ComponentName
 import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.net.MacAddress
 import android.net.wifi.p2p.WifiP2pDevice
+import android.os.Build
 import android.os.IBinder
+import android.os.Parcelable
+import androidx.annotation.RequiresApi
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.MutableLiveData
@@ -12,14 +16,18 @@ import androidx.lifecycle.ViewModel
 import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.RepeaterService
 import be.mygod.vpnhotspot.net.IpNeighbour
-import be.mygod.vpnhotspot.net.MacAddressCompat
+import be.mygod.vpnhotspot.net.TetherType
 import be.mygod.vpnhotspot.net.TetheringManager
 import be.mygod.vpnhotspot.net.TetheringManager.localOnlyTetheredIfaces
 import be.mygod.vpnhotspot.net.TetheringManager.tetheredIfaces
 import be.mygod.vpnhotspot.net.monitor.IpNeighbourMonitor
+import be.mygod.vpnhotspot.net.wifi.WifiApManager
+import be.mygod.vpnhotspot.net.wifi.WifiClient
+import be.mygod.vpnhotspot.root.WifiApCommands
 import be.mygod.vpnhotspot.util.broadcastReceiver
 
-class ClientViewModel : ViewModel(), ServiceConnection, IpNeighbourMonitor.Callback, DefaultLifecycleObserver {
+class ClientViewModel : ViewModel(), ServiceConnection, IpNeighbourMonitor.Callback, DefaultLifecycleObserver,
+    WifiApManager.SoftApCallbackCompat {
     private var tetheredInterfaces = emptySet<String>()
     private val receiver = broadcastReceiver { _, intent ->
         tetheredInterfaces = (intent.tetheredIfaces ?: return@broadcastReceiver).toSet() +
@@ -29,6 +37,7 @@ class ClientViewModel : ViewModel(), ServiceConnection, IpNeighbourMonitor.Callb
 
     private var repeater: RepeaterService.Binder? = null
     private var p2p: Collection<WifiP2pDevice> = emptyList()
+    private var wifiAp = emptyList<Pair<String, MacAddress>>()
     private var neighbours: Collection<IpNeighbour> = emptyList()
     val clients = MutableLiveData<List<Client>>()
     val fullMode = object : DefaultLifecycleObserver {
@@ -41,12 +50,19 @@ class ClientViewModel : ViewModel(), ServiceConnection, IpNeighbourMonitor.Callb
     }
 
     private fun populateClients() {
-        val clients = HashMap<Pair<String, MacAddressCompat>, Client>()
-        val group = repeater?.group
-        val p2pInterface = group?.`interface`
-        if (p2pInterface != null) {
-            for (client in p2p) clients[p2pInterface to MacAddressCompat.fromString(client.deviceAddress)] =
-                    WifiP2pClient(p2pInterface, client)
+        val clients = HashMap<Pair<String, MacAddress>, Client>()
+        repeater?.group?.`interface`?.let { p2pInterface ->
+            for (client in p2p) {
+                val addr = MacAddress.fromString(client.deviceAddress!!)
+                clients[p2pInterface to addr] = object : Client(addr, p2pInterface) {
+                    override val icon: Int get() = TetherType.WIFI_P2P.icon
+                }
+            }
+        }
+        for (client in wifiAp) {
+            clients[client] = object : Client(client.second, client.first) {
+                override val icon: Int get() = TetherType.WIFI.icon
+            }
         }
         for (neighbour in neighbours) {
             val key = neighbour.dev to neighbour.lladdr
@@ -70,8 +86,10 @@ class ClientViewModel : ViewModel(), ServiceConnection, IpNeighbourMonitor.Callb
     override fun onStart(owner: LifecycleOwner) {
         app.registerReceiver(receiver, IntentFilter(TetheringManager.ACTION_TETHER_STATE_CHANGED))
         IpNeighbourMonitor.registerCallback(this, false)
+        if (Build.VERSION.SDK_INT >= 31) WifiApCommands.registerSoftApCallback(this)
     }
     override fun onStop(owner: LifecycleOwner) {
+        if (Build.VERSION.SDK_INT >= 31) WifiApCommands.unregisterSoftApCallback(this)
         IpNeighbourMonitor.unregisterCallback(this)
         app.unregisterReceiver(receiver)
     }
@@ -93,5 +111,13 @@ class ClientViewModel : ViewModel(), ServiceConnection, IpNeighbourMonitor.Callb
     override fun onIpNeighbourAvailable(neighbours: Collection<IpNeighbour>) {
         this.neighbours = neighbours
         populateClients()
+    }
+
+    @RequiresApi(31)
+    override fun onConnectedClientsChanged(clients: List<Parcelable>) {
+        wifiAp = clients.mapNotNull {
+            val client = WifiClient(it)
+            client.apInstanceIdentifier?.run { this to client.macAddress }
+        }
     }
 }

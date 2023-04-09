@@ -1,10 +1,12 @@
 package be.mygod.vpnhotspot.root
 
+import android.annotation.SuppressLint
 import android.os.Parcelable
 import android.util.Log
 import be.mygod.librootkotlinx.*
 import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.util.Services
+import be.mygod.vpnhotspot.util.UnblockCentral
 import kotlinx.parcelize.Parcelize
 import timber.log.Timber
 
@@ -13,6 +15,7 @@ object RootManager : RootSession(), Logger {
     class RootInit : RootCommandNoResult {
         override suspend fun execute(): Parcelable? {
             Timber.plant(object : Timber.DebugTree() {
+                @SuppressLint("LogNotTimber")
                 override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
                     if (priority >= Log.WARN) {
                         System.err.println("$priority/$tag: $message")
@@ -29,6 +32,7 @@ object RootManager : RootSession(), Logger {
             })
             Logger.me = RootManager
             Services.init { systemContext }
+            UnblockCentral.needInit = false
             return null
         }
     }
@@ -40,7 +44,9 @@ object RootManager : RootSession(), Logger {
 
     override suspend fun initServer(server: RootServer) {
         Logger.me = this
-        server.init(app.deviceStorage)
+        AppProcess.shouldRelocateHeuristics.let {
+            server.init(app.deviceStorage, it)
+        }
         server.execute(RootInit())
     }
 }

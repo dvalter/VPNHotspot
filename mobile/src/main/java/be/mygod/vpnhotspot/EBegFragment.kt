@@ -25,8 +25,6 @@ class EBegFragment : AppCompatDialogFragment() {
         super.onViewCreated(view, savedInstanceState)
         dialog!!.setTitle(R.string.settings_misc_donate)
         @Suppress("ConstantConditionIf")
-        if (BuildConfig.DONATIONS) (binding.donationsMoreStub.inflate() as Button).setOnClickListener {
-            requireContext().launchUrl("https://mygod.be/donate/")
-        }
+        requireContext().launchUrl("https://mygod.be/donate/")
     }
 }

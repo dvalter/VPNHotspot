@@ -2,19 +2,20 @@ package be.mygod.vpnhotspot
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.res.Configuration
 import android.location.LocationManager
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.annotation.Size
 import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
-import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
-import androidx.core.provider.FontRequest
-import androidx.emoji.text.EmojiCompat
-import androidx.emoji.text.FontRequestEmojiCompatConfig
 import androidx.preference.PreferenceManager
 import be.mygod.librootkotlinx.NoShellException
 import be.mygod.vpnhotspot.net.DhcpWorkaround
@@ -22,6 +23,8 @@ import be.mygod.vpnhotspot.room.AppDatabase
 import be.mygod.vpnhotspot.root.RootManager
 import be.mygod.vpnhotspot.util.DeviceStorageApp
 import be.mygod.vpnhotspot.util.Services
+import be.mygod.vpnhotspot.util.ParametersBuilder
+import be.mygod.vpnhotspot.widget.SmartSnackbar
 import kotlinx.coroutines.DEBUG_PROPERTY_NAME
 import kotlinx.coroutines.DEBUG_PROPERTY_VALUE_ON
 import kotlinx.coroutines.GlobalScope
@@ -35,31 +38,37 @@ class App : Application() {
         lateinit var app: App
     }
 
+    @SuppressLint("RestrictedApi")
     override fun onCreate() {
         super.onCreate()
         app = this
-        if (Build.VERSION.SDK_INT >= 24) @SuppressLint("RestrictedApi") {
-            deviceStorage = DeviceStorageApp(this)
-            // alternative to PreferenceManager.getDefaultSharedPreferencesName(this)
-            deviceStorage.moveSharedPreferencesFrom(this, PreferenceManager(this).sharedPreferencesName)
-            deviceStorage.moveDatabaseFrom(this, AppDatabase.DB_NAME)
-        } else deviceStorage = this
+        deviceStorage = DeviceStorageApp(this)
+        // alternative to PreferenceManager.getDefaultSharedPreferencesName(this)
+        deviceStorage.moveSharedPreferencesFrom(this, PreferenceManager(this).sharedPreferencesName)
+        deviceStorage.moveDatabaseFrom(this, AppDatabase.DB_NAME)
+        BootReceiver.migrateIfNecessary()
         Services.init { this }
 
         // overhead of debug mode is minimal: https://github.com/Kotlin/kotlinx.coroutines/blob/f528898/docs/debugging.md#debug-mode
         System.setProperty(DEBUG_PROPERTY_NAME, DEBUG_PROPERTY_VALUE_ON)
-        ServiceNotification.updateNotificationChannels()
-        EmojiCompat.init(FontRequestEmojiCompatConfig(deviceStorage, FontRequest(
-                "com.google.android.gms.fonts",
-                "com.google.android.gms",
-                "Noto Color Emoji Compat",
-                R.array.com_google_android_gms_fonts_certs)).apply {
-            setEmojiSpanIndicatorEnabled(BuildConfig.DEBUG)
-            registerInitCallback(object : EmojiCompat.InitCallback() {
-                override fun onInitialized() = Timber.d("EmojiCompat initialized")
-                override fun onFailed(throwable: Throwable?) = Timber.d(throwable)
-            })
+        Timber.plant(object : Timber.DebugTree() {
+            @SuppressLint("LogNotTimber")
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (t == null) {
+                    if (priority != Log.DEBUG || BuildConfig.DEBUG) Log.println(priority, tag, message)
+                    Log.d(tag, message)
+                } else {
+                    if (priority >= Log.WARN || priority == Log.DEBUG) {
+                        Log.println(priority, tag, message)
+                        Log.w(tag, message, t)
+                    }
+                    if (priority >= Log.INFO && t !is NoShellException) {
+                        Log.e(tag, message, t)
+                    }
+                }
+            }
         })
+        ServiceNotification.updateNotificationChannels()
         if (DhcpWorkaround.shouldEnable) DhcpWorkaround.enable(true)
     }
 
@@ -73,6 +82,28 @@ class App : Application() {
         if (level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_BACKGROUND) GlobalScope.launch {
             RootManager.closeExisting()
         }
+    }
+
+    /**
+     * This method is used to log "expected" and well-handled errors, i.e. we care less about logs, etc.
+     * logException is inappropriate sometimes because it flushes all logs that could be used to investigate other bugs.
+     */
+    fun logEvent(@Size(min = 1L, max = 40L) event: String, block: ParametersBuilder.() -> Unit = { }) {
+    }
+
+    /**
+     * LOH also requires location to be turned on. So does p2p for some reason. Source:
+     * https://android.googlesource.com/platform/frameworks/opt/net/wifi/+/53e0284/service/java/com/android/server/wifi/WifiServiceImpl.java#1204
+     * https://android.googlesource.com/platform/frameworks/opt/net/wifi/+/53e0284/service/java/com/android/server/wifi/WifiSettingsStore.java#228
+     */
+    inline fun <reified T> startServiceWithLocation(context: Context) {
+        if (Build.VERSION.SDK_INT < 33 && location?.isLocationEnabled != true) try {
+            context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+            Toast.makeText(context, R.string.tethering_location_off, Toast.LENGTH_LONG).show()
+        } catch (e: ActivityNotFoundException) {
+            app.logEvent("location_settings") { param("message", e.toString()) }
+            SmartSnackbar.make(R.string.tethering_location_off).show()
+        } else context.startForegroundService(Intent(context, T::class.java))
     }
 
     lateinit var deviceStorage: Application
@@ -90,10 +121,10 @@ class App : Application() {
         CustomTabsIntent.Builder().apply {
             setColorScheme(CustomTabsIntent.COLOR_SCHEME_SYSTEM)
             setColorSchemeParams(CustomTabsIntent.COLOR_SCHEME_LIGHT, CustomTabColorSchemeParams.Builder().apply {
-                setToolbarColor(ContextCompat.getColor(app, R.color.light_colorPrimary))
+                setToolbarColor(resources.getColor(R.color.light_colorPrimary, theme))
             }.build())
             setColorSchemeParams(CustomTabsIntent.COLOR_SCHEME_DARK, CustomTabColorSchemeParams.Builder().apply {
-                setToolbarColor(ContextCompat.getColor(app, R.color.dark_colorPrimary))
+                setToolbarColor(resources.getColor(R.color.dark_colorPrimary, theme))
             }.build())
         }.build()
     }

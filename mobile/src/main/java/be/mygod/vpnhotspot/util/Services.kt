@@ -1,15 +1,15 @@
 package be.mygod.vpnhotspot.util
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pManager
-import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.getSystemService
 import timber.log.Timber
 
-@SuppressLint("LogNotTimber")
 object Services {
     private lateinit var contextInit: () -> Context
     val context by lazy { contextInit() }
@@ -17,14 +17,18 @@ object Services {
         contextInit = context
     }
 
+    val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     val connectivity by lazy { context.getSystemService<ConnectivityManager>()!! }
     val p2p by lazy {
         try {
             context.getSystemService<WifiP2pManager>()
         } catch (e: RuntimeException) {
-            if (android.os.Process.myUid() == 0) Log.w("WifiP2pManager", e) else Timber.w(e)
+            Timber.w(e)
             null
         }
     }
     val wifi by lazy { context.getSystemService<WifiManager>()!! }
+
+    fun registerNetworkCallback(request: NetworkRequest, networkCallback: ConnectivityManager.NetworkCallback) =
+        connectivity.registerNetworkCallback(request, networkCallback, mainHandler)
 }
